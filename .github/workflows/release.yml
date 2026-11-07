@@ -1,0 +1,53 @@
+# Prebuilt x86_64 binary for run-in-sandbox's build-satellite.sh, which pins
+# the commit and the tarball's SHA-256. Pushing a sandbox-* tag publishes a
+# release; running it by hand only keeps the tarball as a workflow artifact.
+name: Release
+
+on:
+  push:
+    tags: [ 'sandbox-*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: always
+      ASSET: xwayland-satellite-x86_64-linux.tar.gz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang pkg-config libxcb1-dev libxcb-cursor-dev
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p dist/xwayland-satellite
+          install -m755 target/release/xwayland-satellite dist/xwayland-satellite/
+          install -m644 LICENSE dist/xwayland-satellite/
+          printf '%s\n' "$GITHUB_SHA" > dist/xwayland-satellite/COMMIT
+          tar -C dist --owner=0 --group=0 --numeric-owner -czf "dist/$ASSET" xwayland-satellite
+          (cd dist && sha256sum "$ASSET" > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: xwayland-satellite-x86_64-linux
+          path: |
+            dist/${{ env.ASSET }}
+            dist/SHA256SUMS
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "dist/$ASSET" dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --notes "Built from $GITHUB_SHA in $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
