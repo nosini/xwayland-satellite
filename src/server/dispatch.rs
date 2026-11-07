@@ -90,6 +90,13 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
         _: &DisplayHandle,
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
+        match &request {
+            Request::<WlSurface>::Destroy => state.destroy_role_tree(*entity),
+            Request::<WlSurface>::Attach { buffer: None, .. } => {
+                state.dismiss_popup_children(*entity)
+            }
+            _ => {}
+        }
         let data = state.world.entity(*entity).unwrap();
         let mut role = data.get::<&mut SurfaceRole>();
         let xdg = role.as_ref().and_then(|role| role.xdg());

@@ -247,6 +247,7 @@ struct ToplevelData {
 struct PopupData {
     popup: XdgPopup,
     positioner: XdgPositioner,
+    parent: XdgSurface,
     xdg: XdgSurfaceData,
 }
 
@@ -475,6 +476,7 @@ pub struct InnerServerState<S: X11Selection> {
     unfocus: bool,
     last_focused_toplevel: Option<x::Window>,
     last_hovered: Option<x::Window>,
+    dismissed_popups: Vec<x::Window>,
 
     xdg_wm_base: XdgWmBase,
     compositor: client::wl_compositor::WlCompositor,
@@ -577,6 +579,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             unfocus: false,
             last_focused_toplevel: None,
             last_hovered: None,
+            dismissed_popups: Vec::new(),
             xdg_wm_base,
             compositor,
             subcompositor,
@@ -642,6 +645,10 @@ impl<C: XConnection> ServerState<C> {
 
     pub fn handle_clientside_events(&mut self) {
         self.handle_globals();
+
+        for window in std::mem::take(&mut self.dismissed_popups) {
+            self.connection.unmap_window(window);
+        }
 
         for (target, event) in self.world.read_events() {
             if !self.world.contains(target) {
@@ -1182,8 +1189,98 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             win.mapped = false;
         }
 
-        if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity.unwrap()) {
-            role.destroy();
+        self.destroy_role_tree(entity.unwrap());
+    }
+
+    fn popup_children(&self, entity: Entity) -> Vec<Entity> {
+        let Some(parent) = self
+            .world
+            .get::<&SurfaceRole>(entity)
+            .ok()
+            .and_then(|role| role.xdg().map(|xdg| xdg.surface.clone()))
+        else {
+            return Vec::new();
+        };
+        self.world
+            .query::<&SurfaceRole>()
+            .iter()
+            .filter_map(|(child, role)| {
+                matches!(role, SurfaceRole::Popup(Some(p)) if p.parent == parent).then_some(child)
+            })
+            .collect()
+    }
+
+    fn dismiss_popup_children(&mut self, entity: Entity) {
+        for child in self.popup_children(entity) {
+            self.destroy_role_tree(child);
+            self.dismiss_popup_window(child);
+        }
+        if let Some(window) = self
+            .world
+            .get::<&x::Window>(entity)
+            .ok()
+            .map(|window| *window)
+        {
+            self.forget_role_focus(window);
+        }
+    }
+
+    fn forget_role_focus(&mut self, window: x::Window) {
+        if self.last_focused_toplevel == Some(window) {
+            self.last_focused_toplevel = None;
+        }
+        if self.last_hovered == Some(window) {
+            self.last_hovered = None;
+        }
+        if self
+            .to_focus
+            .as_ref()
+            .is_some_and(|focus| focus.window == window)
+        {
+            self.to_focus = None;
+        }
+    }
+
+    fn dismiss_popup_window(&mut self, entity: Entity) {
+        if let Ok(window) = self.world.get::<&x::Window>(entity) {
+            let window = *window;
+            self.dismissed_popups.push(window);
+            if let Ok(mut win) = self.world.get::<&mut WindowData>(entity) {
+                win.mapped = false;
+            }
+        }
+    }
+
+    // X11 may unmap or destroy ancestors before their popup descendants.
+    // xdg-shell requires deepest popups to be destroyed first. Walk without
+    // recursion so an X11 client cannot overflow our stack with nested menus.
+    fn destroy_role_tree(&mut self, root: Entity) {
+        let mut pending = vec![(root, false)];
+        let mut seen = HashSet::new();
+        while let Some((entity, visited)) = pending.pop() {
+            if visited {
+                if let Some(window) = self
+                    .world
+                    .get::<&x::Window>(entity)
+                    .ok()
+                    .map(|window| *window)
+                {
+                    self.forget_role_focus(window);
+                }
+                if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity) {
+                    role.destroy();
+                }
+                if entity != root {
+                    self.dismiss_popup_window(entity);
+                }
+            } else if seen.insert(entity) {
+                pending.push((entity, true));
+                pending.extend(
+                    self.popup_children(entity)
+                        .into_iter()
+                        .map(|child| (child, false)),
+                );
+            }
         }
     }
 
@@ -1648,6 +1745,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         PopupData {
             popup,
             positioner,
+            parent: parent_role.xdg().unwrap().surface.clone(),
             xdg: XdgSurfaceData {
                 surface: xdg,
                 configured: false,
