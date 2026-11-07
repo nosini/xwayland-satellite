@@ -86,6 +86,15 @@ impl_from!(zxdg_toplevel_decoration_v1::Event, DecorationEvent);
 
 impl Event for SurfaceEvents {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        // Configure and popup_done events can already be queued when an
+        // ancestor forces this role to be dismissed.
+        if matches!(
+            &self,
+            Self::XdgSurface(_) | Self::Toplevel(_) | Self::Popup(_)
+        ) && state.world.get::<&SurfaceRole>(target).is_err()
+        {
+            return;
+        }
         match self {
             SurfaceEvents::WlSurface(event) => Self::surface_event(event, target, state),
             SurfaceEvents::XdgSurface(event) => Self::xdg_event(event, target, state),

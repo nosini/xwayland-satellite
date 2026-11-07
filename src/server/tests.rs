@@ -163,6 +163,7 @@ struct FakeXConnection {
     send_take_focus_window: Option<Window>,
     windows: HashMap<Window, WindowData>,
     set_window_dims_counter: usize,
+    unmapped_windows: Vec<Window>,
 }
 
 impl FakeXConnection {
@@ -251,8 +252,8 @@ impl super::XConnection for FakeXConnection {
         );
     }
 
-    fn unmap_window(&mut self, _: x::Window) {
-        todo!()
+    fn unmap_window(&mut self, window: x::Window) {
+        self.unmapped_windows.push(window);
     }
 }
 
@@ -1112,6 +1113,143 @@ fn popup_flow_simple() {
     f.run();
 
     assert!(f.testwl.get_surface_data(popup_id).is_none());
+}
+
+#[test]
+fn parent_unmap_dismisses_nested_popups_before_destroying_its_role() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let top = Window::new(1);
+    let (_, top_id) = f.create_toplevel(&comp, top);
+    let popup = Window::new(2);
+    let (_, popup_id) = f.create_popup(&comp, PopupBuilder::new(popup, top, top_id));
+    f.satellite.last_hovered = Some(popup);
+    let nested = Window::new(3);
+    let (_, nested_id) = f.create_popup(&comp, PopupBuilder::new(nested, popup, popup_id));
+
+    f.satellite.unmap_window(popup);
+    f.run();
+    assert!(
+        !f.testwl
+            .get_surface_data(nested_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive()
+    );
+    assert!(
+        !f.testwl
+            .get_surface_data(popup_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive()
+    );
+    assert!(
+        f.testwl
+            .get_surface_data(top_id)
+            .unwrap()
+            .xdg()
+            .surface
+            .is_alive()
+    );
+    assert_eq!(f.connection().unmapped_windows, vec![nested]);
+}
+
+#[test]
+fn toplevel_unmap_dismisses_popups_before_destroying_its_role() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let top = Window::new(1);
+    let (_, top_id) = f.create_toplevel(&comp, top);
+    let popup = Window::new(2);
+    let (_, popup_id) = f.create_popup(&comp, PopupBuilder::new(popup, top, top_id));
+    f.satellite.unmap_window(top);
+    f.run();
+    assert!(
+        !f.testwl
+            .get_surface_data(popup_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive()
+    );
+    assert_eq!(f.connection().unmapped_windows, vec![popup]);
+}
+
+#[test]
+fn parent_surface_destroy_dismisses_popups_without_x11_unmap() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let top = Window::new(1);
+    let (surface, top_id) = f.create_toplevel(&comp, top);
+    let popup = Window::new(2);
+    let (_, popup_id) = f.create_popup(&comp, PopupBuilder::new(popup, top, top_id));
+    surface.obj.destroy();
+    f.run();
+    assert!(
+        !f.testwl
+            .get_surface_data(popup_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive()
+    );
+    assert_eq!(f.connection().unmapped_windows, vec![popup]);
+    assert_eq!(f.satellite.last_focused_toplevel, None);
+}
+
+#[test]
+fn parent_buffer_detach_dismisses_popup_before_commit() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let top = Window::new(1);
+    let (surface, top_id) = f.create_toplevel(&comp, top);
+    let popup = Window::new(2);
+    let (_, popup_id) = f.create_popup(&comp, PopupBuilder::new(popup, top, top_id));
+    surface.obj.attach(None, 0, 0);
+    surface.obj.commit();
+    f.run();
+    assert!(
+        !f.testwl
+            .get_surface_data(popup_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive()
+    );
+    assert_eq!(f.connection().unmapped_windows, vec![popup]);
+}
+
+#[test]
+fn dismissing_popup_keeps_its_sibling_and_ignores_queued_configures() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let top = Window::new(1);
+    let (_, top_id) = f.create_toplevel(&comp, top);
+    let popup = Window::new(2);
+    let (_, popup_id) = f.create_popup(&comp, PopupBuilder::new(popup, top, top_id));
+    f.satellite.last_hovered = Some(popup);
+    let child = Window::new(3);
+    let (_, child_id) = f.create_popup(&comp, PopupBuilder::new(child, popup, popup_id));
+    f.satellite.last_hovered = Some(top);
+    let sibling = Window::new(4);
+    let (_, sibling_id) = f.create_popup(&comp, PopupBuilder::new(sibling, top, top_id));
+    f.testwl.configure_popup(child_id);
+    f.satellite.unmap_window(popup);
+    f.run();
+    assert!(
+        !f.testwl
+            .get_surface_data(child_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive()
+    );
+    assert!(
+        f.testwl
+            .get_surface_data(sibling_id)
+            .unwrap()
+            .popup()
+            .popup
+            .is_alive()
+    );
+    assert_eq!(f.connection().unmapped_windows, vec![child]);
 }
 
 #[test]

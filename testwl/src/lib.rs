@@ -323,6 +323,17 @@ impl Default for State {
 }
 
 impl State {
+    fn assert_no_popup_children(&self, surface_id: SurfaceId) {
+        let parent = &self.surfaces[&surface_id].xdg().surface;
+        assert!(
+            !self.surfaces.values().any(|surface| {
+                matches!(&surface.role, Some(SurfaceRole::Popup(p))
+                    if p.popup.is_alive() && &p.parent == parent)
+            }),
+            "destroyed popup not top most popup"
+        );
+    }
+
     #[track_caller]
     fn configure_toplevel(
         &mut self,
@@ -1517,7 +1528,9 @@ impl Dispatch<XdgPopup, SurfaceId> for State {
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
-            xdg_popup::Request::Destroy => {}
+            xdg_popup::Request::Destroy => {
+                state.assert_no_popup_children(*surface_id);
+            }
             xdg_popup::Request::Reposition { positioner, token } => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 let Some(SurfaceRole::Popup(p)) = &mut data.role else {
@@ -1712,6 +1725,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                 assert!(data.xdg().last_configure_serial >= serial);
             }
             xdg_surface::Request::Destroy => {
+                state.assert_no_popup_children(*surface_id);
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 let role_alive = data.role.is_none()
                     || match data.role.as_ref().unwrap() {
